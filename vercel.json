@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    { "source": "/", "destination": "/api/eft" }
+  ],
+  "functions": {
+    "api/eft.js": { "maxDuration": 60 }
+  }
+}
