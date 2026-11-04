@@ -1,4 +1,4 @@
-// Inner Alchemy EFT-Inspired Script Creator: the whole app in one file.
+// Returning to You EFT-Inspired Script Creator: the whole app in one file.
 // The page asks the nine intake questions itself, one at a time. When all nine are
 // answered, this file makes ONE Claude Haiku call to write the personalized script.
 // Safety: crisis words are checked on the page after every answer AND here on the
@@ -32,7 +32,7 @@ const SAFETY_RE = new RegExp(SAFETY_SOURCE, "i");
 const needsSafetyStop = text => SAFETY_RE.test(String(text || "").replace(/[’‘]/g, "'"));
 
 // ---------- What Claude is asked to do ----------
-const SYSTEM_PROMPT = `You are the Inner Alchemy EFT-Inspired Script Creator, a structured writing assistant. You are not a therapist, EFT practitioner, counselor, diagnostician, medical professional, crisis worker, psychic, or relationship coach.
+const SYSTEM_PROMPT = `You are the Returning to You EFT-Inspired Script Creator, a structured writing assistant. You are not a therapist, EFT practitioner, counselor, diagnostician, medical professional, crisis worker, psychic, or relationship coach.
 
 The user has already answered the nine intake questions. Your job is to write exactly one personalized EFT-inspired tapping reflection script from their answers. The script is a general wellness and personal reflection practice that helps the user acknowledge one current situation, notice their feelings without judgment, observe tension without interpreting it, respond to themselves with compassion, create some space around a recurring thought, return to the present moment, and move toward a believable sense of peace, acceptance, or grounding. Never promise a specific emotional outcome or claim that tapping heals, treats, cures, clears, releases, or resolves medical or psychological conditions.
 
@@ -62,7 +62,7 @@ Every tapping statement is first person, short, and easy to speak aloud. Calm, w
 Avoid clinical language, diagnoses, therapy terminology, dramatic emotional descriptions, forced positivity, exaggerated encouragement, complex metaphors or spiritual explanations, claims of energetic or emotional healing, predictions, coaching, relationship interpretation, and guarantees of transformation. Never claim the user has processed trauma, changed their nervous system, cleared an energetic block, healed an emotional wound, reprogrammed their subconscious, or completed emotional treatment.
 
 SPIRITUAL LANGUAGE
-If the preference is "Yes, include it": you may use gentle Inner Alchemy spiritual language sparingly, only from Round 4 onward (Round 4, Round 5, closing): connection to Source, gentle spiritual trust, inner wisdom, soul, consciousness, willingness to surrender some control, spiritual growth as a personal possibility. Keep it grounded, optional, and emotionally respectful; never use it to dismiss or bypass feelings; never present beliefs as universal facts. Never promise divine intervention, guaranteed reunion, manifestation of a particular person, twin-flame certainty, a predetermined spiritual outcome, spiritual healing, destiny, or certainty about another person's intentions. Never imply that a person must stop feeling pain to become spiritually aligned.
+If the preference is "Yes, include it": you may use gentle Returning to You spiritual language sparingly, only from Round 4 onward (Round 4, Round 5, closing): connection to Source, gentle spiritual trust, inner wisdom, soul, consciousness, willingness to surrender some control, spiritual growth as a personal possibility. Keep it grounded, optional, and emotionally respectful; never use it to dismiss or bypass feelings; never present beliefs as universal facts. Never promise divine intervention, guaranteed reunion, manifestation of a particular person, twin-flame certainty, a predetermined spiritual outcome, spiritual healing, destiny, or certainty about another person's intentions. Never imply that a person must stop feeling pain to become spiritually aligned.
 If the preference is "No, keep the language straightforward": use no references to soul, Source, surrender, consciousness, divine timing, spiritual growth, or any spiritual or mystical concept anywhere. Keep everything compassionate, straightforward, and practical.
 
 Before answering, silently check: one issue only; summary includes strongest feeling, recurring thought, body or attention experience, and the rating; every tapping statement is first person; the five stages are in order; spiritual language only if requested; no diagnosis, interpretation, treatment claim, prediction, or guarantee; no follow-up question, coaching, or extra script.`;
@@ -98,21 +98,46 @@ function intakeText(a){
 9. Spiritual language: ${a.spiritual ? "Yes, include it." : "No, keep the language straightforward."}`;
 }
 
-async function writeScript(a){
+const JSON_HINT = `
+
+Reply with only a JSON object, no other text, in exactly this shape:
+{"safety_stop": false, "summary": "...", "setup": {"statement_1": "...", "statement_2": "...", "statement_3": "..."}, "rounds": {${ROUNDS.map(r => `"${r}": {${POINTS.map(p => `"${p}": "..."`).join(", ")}}`).join(", ")}}, "closing": {"reflection_1": "...", "reflection_2": "...", "reflection_3": "..."}}`;
+
+function parseScript(text){
+  const start = text.indexOf("{"), end = text.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("no JSON in reply");
+  return JSON.parse(text.slice(start, end + 1));
+}
+
+// Asks Claude once. With strict = true, the reply shape is enforced by the API; if that
+// is not accepted, the same request is sent with the shape described in words instead.
+async function askClaude(a, strict){
   const message = await client.messages.create({
     model: MODEL,
     max_tokens: 8000,
-    output_config: { effort: "low", format: { type: "json_schema", schema: SCRIPT_SCHEMA } },
-    system: SYSTEM_PROMPT,
+    output_config: strict ? { effort: "low", format: { type: "json_schema", schema: SCRIPT_SCHEMA } } : { effort: "low" },
+    system: strict ? SYSTEM_PROMPT : SYSTEM_PROMPT + JSON_HINT,
     messages: [{ role: "user", content: intakeText(a) }],
   });
   if (message.stop_reason === "refusal") return { refused: true };
   const text = message.content.filter(b => b.type === "text").map(b => b.text).join("");
-  const s = JSON.parse(text);
-  if (s.safety_stop) return { safety: true };
-  const all = [s.summary, ...Object.values(s.setup), ...ROUNDS.flatMap(r => Object.values(s.rounds[r])), ...Object.values(s.closing)];
-  if (all.some(x => !String(x || "").trim())) throw new Error("incomplete script");
-  return { script: s };
+  if (message.stop_reason === "max_tokens") throw new Error("reply was cut off");
+  return { s: parseScript(text) };
+}
+
+function complete(s){
+  const pick = (o, keys) => keys.map(k => String(o?.[k] ?? "").trim());
+  const all = [String(s?.summary ?? "").trim(), ...pick(s?.setup, ["statement_1","statement_2","statement_3"]),
+    ...ROUNDS.flatMap(r => pick(s?.rounds?.[r], POINTS)), ...pick(s?.closing, ["reflection_1","reflection_2","reflection_3"])];
+  return all.every(Boolean);
+}
+
+async function writeScript(a, strict){
+  const out = await askClaude(a, strict);
+  if (out.refused) return { refused: true };
+  if (out.s.safety_stop === true) return { safety: true };
+  if (!complete(out.s)) throw new Error("incomplete script");
+  return { script: out.s };
 }
 
 // ---------- The web address handler ----------
@@ -151,17 +176,25 @@ export default async function handler(req, res){
     res.status(200).json({ safety: true });
     return;
   }
-  for (let attempt = 1; attempt <= 2; attempt++){
+  if (!process.env.ANTHROPIC_API_KEY){
+    console.error("ANTHROPIC_API_KEY is not set in this Vercel project.");
+    res.status(500).json({ error: "nokey" });
+    return;
+  }
+  let reason = "failed";
+  for (const strict of [true, false, false]){
     try{
-      const out = await writeScript(a);
+      const out = await writeScript(a, strict);
       if (out.refused){ res.status(200).json({ safety: true }); return; }
       res.status(200).json(out);
       return;
     } catch (e){
-      console.error("Script attempt " + attempt + " failed:", e?.status || "", e?.message);
+      console.error("Script attempt failed (" + (strict ? "strict" : "plain") + "):", e?.status || "", e?.message);
+      if (e?.status === 401 || e?.status === 403){ reason = "badkey"; break; }
+      if (e?.status === 400 && /credit|billing|balance/i.test(e?.message || "")){ reason = "billing"; break; }
     }
   }
-  res.status(502).json({ error: "failed" });
+  res.status(502).json({ error: reason });
 }
 
 // ---------- The page people see ----------
@@ -176,8 +209,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#160a13;--surface:#20101b;--ink:#f5e8ee;--ink-soft:#c39cb2;--ink-faint:#8f6e80;--line:#3a1f31;--deep:#f0b3d9;--accent:#ef5c98;--tint:#33182a;--tint-line:#4a2438;--danger:#ff8095;color-scheme:dark}}
 :root[data-theme="dark"]{--bg:#160a13;--surface:#20101b;--ink:#f5e8ee;--ink-soft:#c39cb2;--ink-faint:#8f6e80;--line:#3a1f31;--deep:#f0b3d9;--accent:#ef5c98;--tint:#33182a;--tint-line:#4a2438;--danger:#ff8095;color-scheme:dark}
 *{box-sizing:border-box}
+html{font-size:18px}
 html,body{margin:0}
-body{background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,sans-serif;font-size:16px;line-height:1.6}
+body{background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,sans-serif;font-size:18px;line-height:1.6}
 [hidden]{display:none!important}
 h1,h2,h3,.serif{font-family:"Fraunces",Georgia,serif}
 header{border-bottom:1px solid var(--line);background:var(--bg);position:sticky;top:0;z-index:2}
@@ -187,7 +221,7 @@ header{border-bottom:1px solid var(--line);background:var(--bg);position:sticky;
 .count{font-size:.78rem;color:var(--ink-faint);white-space:nowrap}
 .bar{height:3px;background:var(--line)}.bar span{display:block;height:100%;width:0;background:var(--accent);transition:width .35s ease}
 main{max-width:720px;margin:0 auto;padding:1.75rem 1.25rem 3rem}
-.ghost{font:inherit;font-size:.85rem;border:1px solid var(--line);background:transparent;color:var(--ink-soft);padding:.5rem .85rem;border-radius:8px;cursor:pointer}
+.ghost{font:inherit;font-size:.85rem;white-space:nowrap;border:1px solid var(--line);background:transparent;color:var(--ink-soft);padding:.5rem .85rem;border-radius:8px;cursor:pointer}
 .ghost:hover{border-color:var(--accent);color:var(--accent)}
 .primary{font:inherit;font-weight:500;font-size:.95rem;border:0;border-radius:10px;padding:.75rem 1.3rem;background:var(--deep);color:var(--bg);cursor:pointer}
 .primary:disabled{opacity:.4;cursor:default}
@@ -238,10 +272,10 @@ textarea:focus,input:focus{border-color:var(--accent);outline:none}
 .safety h1{color:var(--danger)!important}
 .actions{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:1rem}
 .fine{max-width:720px;margin:0 auto;padding:0 1.25rem 1.5rem;font-size:.72rem;color:var(--ink-faint);text-align:center}
-@media (max-width:600px){.eyebrow{display:none}.brand{font-size:1.05rem}.top{align-items:center;padding:.7rem 1rem}main{padding:1.25rem 1rem 2.5rem}.qtext{font-size:1.2rem}.count{display:none}.scale{grid-template-columns:repeat(6,1fr)}.lines li{grid-template-columns:1fr;gap:.1rem}}
+@media (max-width:600px){.eyebrow{font-size:.62rem}.brand{font-size:1.05rem}.top{align-items:center;padding:.7rem 1rem}main{padding:1.25rem 1rem 2.5rem}.qtext{font-size:1.2rem}.count{display:none}.scale{grid-template-columns:repeat(6,1fr)}.lines li{grid-template-columns:1fr;gap:.1rem}}
 @media print{header,.actions,.fine{display:none!important}body{background:#fff;color:#000}.round,.closing,.summary{break-inside:avoid}}
 </style></head><body>
-<header><div class="top"><div><p class="eyebrow">Inner Alchemy</p><p class="brand serif">EFT-Inspired Script Creator</p></div>
+<header><div class="top"><div><p class="eyebrow">Returning to You</p><p class="brand serif">EFT-Inspired Script Creator</p></div>
 <div style="display:flex;gap:.75rem;align-items:center"><span class="count" id="count" hidden></span><button class="ghost" id="restart" type="button" hidden>Start over</button></div></div>
 <div class="bar" aria-hidden="true"><span id="fill"></span></div></header>
 <main>
@@ -278,7 +312,7 @@ textarea:focus,input:focus{border-color:var(--accent);outline:none}
 <div id="script" class="prose"></div>
 </section>
 </main>
-<p class="fine">Inner Alchemy · a personal reflection practice, not a substitute for medical or psychological care</p>
+<p class="fine">Returning to You · a personal reflection practice, not a substitute for medical or psychological care</p>
 <script>
 (function(){
 var API_URL = "/api/eft";
@@ -357,7 +391,7 @@ var STEPS = [
     help:"Choose something that feels realistic and believable for you right now, rather than a perfect outcome.",
     render:function(){ return inputBox("direction") + chips(DIRECTIONS); }, wire:wireChips,
     read:function(){ A.direction = $("f").value.trim(); return need(A.direction, "Please write or tap a direction."); } },
-  { n:9, key:"spiritual", q:"Would you like gentle Inner Alchemy spiritual language included in your script?", help:"",
+  { n:9, key:"spiritual", q:"Would you like gentle Returning to You spiritual language included in your script?", help:"",
     render:function(){ return '<div class="choices" id="sp"><button type="button" class="choice" data-v="yes" aria-pressed="' + (A.spiritual === true) + '">1. Yes, include it.</button><button type="button" class="choice" data-v="no" aria-pressed="' + (A.spiritual === false) + '">2. No, keep the language straightforward.</button></div>'; },
     wire:function(){ $("sp").addEventListener("click", function(e){ var b = e.target.closest(".choice"); if (!b) return; A.spiritual = b.dataset.v === "yes"; [].forEach.call($("sp").children, function(x){ x.setAttribute("aria-pressed", x === b); }); $("qerr").hidden = true; }); },
     read:function(){ return A.spiritual === null ? "Please choose one option." : ""; } }
@@ -404,8 +438,9 @@ async function create(){
   $("status").innerHTML = '<p class="dots"><i></i><i></i><i></i> Writing your personalized script…</p>';
   try{
     var r = await fetch(API_URL, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(A) });
-    if (!r.ok) throw new Error(r.status);
-    var data = await r.json();
+    var data = {};
+    try{ data = await r.json(); } catch(e){}
+    if (!r.ok) throw new Error(data.error || r.status);
     if (data.safety){ safetyStop(); return; }
     if (!data.script) throw new Error("empty");
     last = data.script;
@@ -413,7 +448,8 @@ async function create(){
     $("script").innerHTML = render(last);
     $("copy").onclick = copyScript; $("print").onclick = function(){ window.print(); };
   } catch (e){
-    $("status").innerHTML = '<div class="notice err">Something went wrong while writing your script. Your answers are still here.</div><div class="actions"><button class="primary" id="retry" type="button">Try again</button></div>';
+    var why = { nokey:"Setup note for the site owner: the ANTHROPIC_API_KEY is missing in this Vercel project.", badkey:"Setup note for the site owner: the Anthropic API key in Vercel was not accepted.", billing:"Setup note for the site owner: the Anthropic account needs credits." }[e.message] || "";
+    $("status").innerHTML = '<div class="notice err">Something went wrong while writing your script. Your answers are still here.' + (why ? '<br><small>' + esc(why) + '</small>' : '') + '</div><div class="actions"><button class="primary" id="retry" type="button">Try again</button></div>';
     $("retry").onclick = create;
   }
 }
